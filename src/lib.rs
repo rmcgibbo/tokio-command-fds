@@ -17,35 +17,38 @@
 //! # Example
 //!
 //! ```rust
-//! use command_fds::{CommandFdExt, FdMapping};
-//! use std::fs::File;
-//! use std::os::unix::io::AsRawFd;
-//! use std::process::Command;
+//! #[tokio::main(flavor="current_thread")]
+//! async fn main() {
+//!     use tokio_command_fds::{CommandFdExt, FdMapping};
+//!     use std::fs::File;
+//!     use std::os::unix::io::AsRawFd;
+//!     use tokio::process::Command;
 //!
-//! // Open a file.
-//! let file = File::open("Cargo.toml").unwrap();
+//!     // Open a file.
+//!     let file = File::open("Cargo.toml").unwrap();
 //!
-//! // Prepare to run `ls -l /proc/self/fd` with some FDs mapped.
-//! let mut command = Command::new("ls");
-//! command.arg("-l").arg("/proc/self/fd");
-//! command
-//!     .fd_mappings(vec![
-//!         // Map `file` as FD 3 in the child process.
-//!         FdMapping {
-//!             parent_fd: file.as_raw_fd(),
-//!             child_fd: 3,
-//!         },
-//!         // Map this process's stdin as FD 5 in the child process.
-//!         FdMapping {
-//!             parent_fd: 0,
-//!             child_fd: 5,
-//!         },
-//!     ])
-//!     .unwrap();
+//!     // Prepare to run `ls -l /proc/self/fd` with some FDs mapped.
+//!     let mut command = tokio::process::Command::new("ls");
+//!     command.arg("-l").arg("/proc/self/fd");
+//!     command
+//!         .fd_mappings(vec![
+//!             // Map `file` as FD 3 in the child process.
+//!             FdMapping {
+//!                 parent_fd: file.as_raw_fd(),
+//!                 child_fd: 3,
+//!             },
+//!             // Map this process's stdin as FD 5 in the child process.
+//!             FdMapping {
+//!                 parent_fd: 0,
+//!                 child_fd: 5,
+//!             },
+//!         ])
+//!         .unwrap();
 //!
-//! // Spawn the child process.
-//! let mut child = command.spawn().unwrap();
-//! child.wait().unwrap();
+//!     // Spawn the child process.
+//!     let mut child = command.spawn().unwrap();
+//!     child.wait().await.unwrap();
+//! }
 //! ```
 
 use nix::fcntl::{fcntl, FcntlArg, FdFlag};
@@ -53,9 +56,8 @@ use nix::unistd::dup2;
 use std::cmp::max;
 use std::io;
 use std::os::unix::io::RawFd;
-use std::os::unix::process::CommandExt;
-use std::process::Command;
 use thiserror::Error;
+use tokio::process::Command;
 
 /// A mapping from a file descriptor in the parent to a file descriptor in the child, to be applied
 /// when spawning a child process.
@@ -175,18 +177,24 @@ fn preserve_fds(fds: &[RawFd]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lazy_static::lazy_static;
     use nix::unistd::close;
     use std::collections::HashSet;
     use std::fs::{read_dir, File};
     use std::os::unix::io::AsRawFd;
     use std::process::Output;
     use std::str;
+    use std::sync::Mutex;
     use std::sync::Once;
 
     static SETUP: Once = Once::new();
+    lazy_static! {
+        static ref TEST_MUTEX: Mutex<()> = Mutex::new(());
+    }
 
     #[test]
     fn conflicting_mappings() {
+        let _guard = TEST_MUTEX.lock().unwrap();
         setup();
 
         let mut command = Command::new("ls");
@@ -222,142 +230,184 @@ mod tests {
 
     #[test]
     fn no_mappings() {
+        let _guard = TEST_MUTEX.lock().unwrap();
         setup();
+        let basic_rt = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .unwrap();
+        basic_rt.block_on(async {
+            let mut command = Command::new("ls");
+            command.arg("/proc/self/fd");
 
-        let mut command = Command::new("ls");
-        command.arg("/proc/self/fd");
+            assert!(command.fd_mappings(vec![]).is_ok());
 
-        assert!(command.fd_mappings(vec![]).is_ok());
-
-        let output = command.output().unwrap();
-        expect_fds(&output, &[0, 1, 2, 3], 0);
+            let output = command.output().await.unwrap();
+            expect_fds(&output, &[0, 1, 2, 3], 0);
+        });
     }
 
     #[test]
     fn none_preserved() {
+        let _guard = TEST_MUTEX.lock().unwrap();
         setup();
+        let basic_rt = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .unwrap();
+        basic_rt.block_on(async {
+            let mut command = Command::new("ls");
+            command.arg("/proc/self/fd");
 
-        let mut command = Command::new("ls");
-        command.arg("/proc/self/fd");
+            command.preserved_fds(vec![]);
 
-        command.preserved_fds(vec![]);
-
-        let output = command.output().unwrap();
-        expect_fds(&output, &[0, 1, 2, 3], 0);
+            let output = command.output().await.unwrap();
+            expect_fds(&output, &[0, 1, 2, 3], 0);
+        });
     }
 
     #[test]
     fn one_mapping() {
+        let _guard = TEST_MUTEX.lock().unwrap();
         setup();
+        let basic_rt = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .unwrap();
+        basic_rt.block_on(async {
+            let mut command = Command::new("ls");
+            command.arg("/proc/self/fd");
 
-        let mut command = Command::new("ls");
-        command.arg("/proc/self/fd");
+            let file = File::open("testdata/file1.txt").unwrap();
+            // Map the file an otherwise unused FD.
+            assert!(command
+                .fd_mappings(vec![FdMapping {
+                    parent_fd: file.as_raw_fd(),
+                    child_fd: 5,
+                },])
+                .is_ok());
 
-        let file = File::open("testdata/file1.txt").unwrap();
-        // Map the file an otherwise unused FD.
-        assert!(command
-            .fd_mappings(vec![FdMapping {
-                parent_fd: file.as_raw_fd(),
-                child_fd: 5,
-            },])
-            .is_ok());
-
-        let output = command.output().unwrap();
-        expect_fds(&output, &[0, 1, 2, 3, 5], 0);
+            let output = command.output().await.unwrap();
+            expect_fds(&output, &[0, 1, 2, 3, 5], 0);
+        });
     }
 
     #[test]
     fn one_preserved() {
+        let _guard = TEST_MUTEX.lock().unwrap();
         setup();
+        let basic_rt = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .unwrap();
+        basic_rt.block_on(async {
+            let mut command = Command::new("ls");
+            command.arg("/proc/self/fd");
 
-        let mut command = Command::new("ls");
-        command.arg("/proc/self/fd");
+            let file = File::open("testdata/file1.txt").unwrap();
+            let file_fd = file.as_raw_fd();
+            command.preserved_fds(vec![file_fd]);
+            assert!(file_fd > 3);
 
-        let file = File::open("testdata/file1.txt").unwrap();
-        let file_fd = file.as_raw_fd();
-        command.preserved_fds(vec![file_fd]);
-        assert!(file_fd > 3);
-
-        let output = command.output().unwrap();
-        expect_fds(&output, &[0, 1, 2, 3, file_fd], 0);
+            let output = command.output().await.unwrap();
+            expect_fds(&output, &[0, 1, 2, 3, file_fd], 0);
+        })
     }
 
     #[test]
     fn swap_mappings() {
+        let _guard = TEST_MUTEX.lock().unwrap();
         setup();
+        let basic_rt = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .unwrap();
+        basic_rt.block_on(async {
+            let mut command = Command::new("ls");
+            command.arg("/proc/self/fd");
 
-        let mut command = Command::new("ls");
-        command.arg("/proc/self/fd");
+            let file1 = File::open("testdata/file1.txt").unwrap();
+            let file2 = File::open("testdata/file2.txt").unwrap();
+            let fd1 = file1.as_raw_fd();
+            let fd2 = file2.as_raw_fd();
+            // Map files to each other's FDs, to ensure that the temporary FD logic works.
+            assert!(command
+                .fd_mappings(vec![
+                    FdMapping {
+                        parent_fd: fd1,
+                        child_fd: fd2,
+                    },
+                    FdMapping {
+                        parent_fd: fd2,
+                        child_fd: fd1,
+                    },
+                ])
+                .is_ok(),);
 
-        let file1 = File::open("testdata/file1.txt").unwrap();
-        let file2 = File::open("testdata/file2.txt").unwrap();
-        let fd1 = file1.as_raw_fd();
-        let fd2 = file2.as_raw_fd();
-        // Map files to each other's FDs, to ensure that the temporary FD logic works.
-        assert!(command
-            .fd_mappings(vec![
-                FdMapping {
-                    parent_fd: fd1,
-                    child_fd: fd2,
-                },
-                FdMapping {
-                    parent_fd: fd2,
-                    child_fd: fd1,
-                },
-            ])
-            .is_ok(),);
-
-        let output = command.output().unwrap();
-        // Expect one more Fd for the /proc/self/fd directory. We can't predict what number it will
-        // be assigned, because 3 might or might not be taken already by fd1 or fd2.
-        expect_fds(&output, &[0, 1, 2, fd1, fd2], 1);
+            let output = command.output().await.unwrap();
+            // Expect one more Fd for the /proc/self/fd directory. We can't predict what number it will
+            // be assigned, because 3 might or might not be taken already by fd1 or fd2.
+            expect_fds(&output, &[0, 1, 2, fd1, fd2], 1);
+        });
     }
 
     #[test]
     fn one_to_one_mapping() {
+        let _guard = TEST_MUTEX.lock().unwrap();
         setup();
+        let basic_rt = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .unwrap();
+        basic_rt.block_on(async {
+            let mut command = Command::new("ls");
+            command.arg("/proc/self/fd");
 
-        let mut command = Command::new("ls");
-        command.arg("/proc/self/fd");
+            let file1 = File::open("testdata/file1.txt").unwrap();
+            let file2 = File::open("testdata/file2.txt").unwrap();
+            let fd1 = file1.as_raw_fd();
+            // Map file1 to the same FD it currently has, to ensure the special case for that works.
+            assert!(command
+                .fd_mappings(vec![FdMapping {
+                    parent_fd: fd1,
+                    child_fd: fd1,
+                }])
+                .is_ok());
 
-        let file1 = File::open("testdata/file1.txt").unwrap();
-        let file2 = File::open("testdata/file2.txt").unwrap();
-        let fd1 = file1.as_raw_fd();
-        // Map file1 to the same FD it currently has, to ensure the special case for that works.
-        assert!(command
-            .fd_mappings(vec![FdMapping {
-                parent_fd: fd1,
-                child_fd: fd1,
-            }])
-            .is_ok());
+            let output = command.output().await.unwrap();
+            // Expect one more Fd for the /proc/self/fd directory. We can't predict what number it will
+            // be assigned, because 3 might or might not be taken already by fd1 or fd2.
+            expect_fds(&output, &[0, 1, 2, fd1], 1);
 
-        let output = command.output().unwrap();
-        // Expect one more Fd for the /proc/self/fd directory. We can't predict what number it will
-        // be assigned, because 3 might or might not be taken already by fd1 or fd2.
-        expect_fds(&output, &[0, 1, 2, fd1], 1);
-
-        // Keep file2 open until the end, to ensure that it's not passed to the child.
-        drop(file2);
+            // Keep file2 open until the end, to ensure that it's not passed to the child.
+            drop(file2);
+        });
     }
 
     #[test]
     fn map_stdin() {
+        let _guard = TEST_MUTEX.lock().unwrap();
         setup();
+        let basic_rt = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .unwrap();
+        basic_rt.block_on(async {
+            let mut command = Command::new("cat");
 
-        let mut command = Command::new("cat");
+            let file = File::open("testdata/file1.txt").unwrap();
+            // Map the file to stdin.
+            assert!(command
+                .fd_mappings(vec![FdMapping {
+                    parent_fd: file.as_raw_fd(),
+                    child_fd: 0,
+                },])
+                .is_ok());
 
-        let file = File::open("testdata/file1.txt").unwrap();
-        // Map the file to stdin.
-        assert!(command
-            .fd_mappings(vec![FdMapping {
-                parent_fd: file.as_raw_fd(),
-                child_fd: 0,
-            },])
-            .is_ok());
-
-        let output = command.output().unwrap();
-        assert!(output.status.success());
-        assert_eq!(output.stdout, b"test 1");
+            let output = command.output().await.unwrap();
+            assert!(output.status.success());
+            assert_eq!(output.stdout, b"test 1");
+        });
     }
 
     /// Parse the output of ls into a set of filenames

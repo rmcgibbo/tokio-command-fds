@@ -1,5 +1,5 @@
 [package]
-name = "command-fds"
+name = "tokio-command-fds"
 version = "0.2.1"
 edition = "2018"
 authors = ["Andrew Walbran <qwandor@google.com>"]
@@ -10,5 +10,10 @@ keywords = ["command", "process", "child", "subprocess", "fd"]
 categories = ["os::unix-apis"]
 
 [dependencies]
-nix = "0.22.0"
-thiserror = "1.0.24"
+nix = ">=0.22"
+thiserror = "^1"
+tokio = { version = "^1", features = ["process"] }
+
+[dev-dependencies]
+tokio = { version = "^1", features = ["process", "rt", "macros"] }
+lazy_static = "*"
