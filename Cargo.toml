@@ -16,4 +16,4 @@ tokio = { version = "^1", features = ["process"] }
 
 [dev-dependencies]
 tokio = { version = "^1", features = ["process", "rt", "macros"] }
-lazy_static = "*"
+lazy_static = "^1"
